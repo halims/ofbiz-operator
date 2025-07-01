@@ -36,7 +36,7 @@ spec:
     password:
       # The operator will create a secret named 'ofbiz-production-admin-password'
       # with this value and pass it as an ENV VAR.
-      value: "singKong"
+      value: "adminPassword123!"
 
   # === SSL Certificate (Optional) ===
   web:
