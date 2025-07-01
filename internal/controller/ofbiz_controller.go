@@ -242,7 +242,8 @@ func (r *OfbizReconciler) reconcilePasswordSecret(ctx context.Context, ofbiz *of
 // reconcileConfigMap creates a ConfigMap from the inline spec.
 // It returns the name of the ConfigMap to be used.
 func (r *OfbizReconciler) reconcileConfigMap(ctx context.Context, ofbiz *ofbizv1alpha1.Ofbiz) (string, error) {
-	if ofbiz.Spec.Storage == nil || ofbiz.Spec.Storage.Configuration == nil {
+
+	if ofbiz.Spec.Storage.Configuration == nil {
 		return "", nil // No configuration specified
 	}
 
@@ -345,20 +346,20 @@ func (r *OfbizReconciler) reconcileService(ctx context.Context, ofbiz *ofbizv1al
 }
 
 // statefulSetForOfbiz defines the StatefulSet for the Ofbiz cluster
-func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *appsv1.StatefulSet {
+func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz, dbSecretName, adminSecretName, configMapName string) *appsv1.StatefulSet {
 	labels := map[string]string{"app": ofbiz.Name}
 	replicas := ofbiz.Spec.Size
 
 	// --- Define Volumes ---
 	volumes := []corev1.Volume{}
 	// Mount the configuration ConfigMap
-	if ofbiz.Spec.Storage.ConfigurationConfigMapName != "" {
+	if ofbiz.Spec.Storage.Configuration.ConfigMapName != "" {
 		volumes = append(volumes, corev1.Volume{
 			Name: "config-volume",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: ofbiz.Spec.Storage.ConfigurationConfigMapName,
+						Name: ofbiz.Spec.Storage.Configuration.ConfigMapName,
 					},
 				},
 			},
@@ -378,7 +379,7 @@ func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *appsv
 
 	// --- Define Volume Mounts ---
 	volumeMounts := []corev1.VolumeMount{}
-	if ofbiz.Spec.Storage.ConfigurationConfigMapName != "" {
+	if ofbiz.Spec.Storage.Configuration.ConfigMapName != "" {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name: "config-volume",
 			// This path should correspond to where OFBiz looks for its config
@@ -445,7 +446,7 @@ func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *appsv
 	//	}
 
 	// --- Define Volumes ---
-	volumes := []corev1.Volume{}
+	//	volumes := []corev1.Volume{}
 	// Mount the configuration ConfigMap
 	if configMapName != "" {
 		volumes = append(volumes, corev1.Volume{
@@ -519,17 +520,6 @@ func pqQuoteIdentifier(name string) string {
 	return `"` + name + `"`
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *OfbizReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&ofbizv1alpha1.Ofbiz{}).
-		Owns(&appsv1.StatefulSet{}).
-		Owns(&corev1.Service{}).
-		Owns(&corev1.Secret{}).    // We now own Secrets
-		Owns(&corev1.ConfigMap{}). // and ConfigMaps
-		Complete(r)
-}
-
 // reconcileStatefulSet ensures the StatefulSet exists and is up-to-date
 func (r *OfbizReconciler) reconcileStatefulSet(ctx context.Context, ofbiz *ofbizv1alpha1.Ofbiz, sts *appsv1.StatefulSet) error {
 	found := &appsv1.StatefulSet{}
@@ -565,8 +555,10 @@ func getPodNames(pods []corev1.Pod) []string {
 func (r *OfbizReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ofbizv1alpha1.Ofbiz{}).
-		Owns(&appsv1.StatefulSet{}). // The operator owns the StatefulSets it creates
-		Owns(&corev1.Service{}).     // and the Services
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.Secret{}).    // We now own Secrets
+		Owns(&corev1.ConfigMap{}). // and ConfigMaps
 		Complete(r)
 }
 
