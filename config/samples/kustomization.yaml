@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- ofbiz_v1alpha1_ofbiz.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
