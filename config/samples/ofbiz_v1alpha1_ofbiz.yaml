@@ -1,9 +1,85 @@
+# ofbiz-instance.yaml
 apiVersion: ofbiz.ofbiz.apache.org/v1alpha1
 kind: Ofbiz
 metadata:
-  labels:
-    app.kubernetes.io/name: ofbiz-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: ofbiz-sample
+  name: ofbiz-production
+  namespace: default
 spec:
-  # TODO(user): Add fields here
+  # === General Settings ===
+  size: 1
+  image: "quay.io/hskube/ofbiz:24.09.01" # Ensure this image's entrypoint can read ENV VARS for config
+
+  # === Automatic PostgreSQL Management ===
+  # If this section is included, the operator will use these credentials
+  # to create the database and user specified in the 'database' section below.
+  postgresAdmin:
+    host: "postgres-service.database.svc.cluster.local" # Host of your PG instance
+    port: 5432
+    user: "postgres" # The superuser
+    sslMode: "disable" # Or 'require', 'verify-full'
+    passwordSecretName: "postgres-admin-secret" # The secret created above
+
+  # === OFBiz Database Configuration ===
+  # The operator will create the 'ofbizdb' database and the 'ofbizuser' user.
+  database:
+    host: "postgres-service.database.svc.cluster.local" # Same host
+    port: 5432
+    name: "ofbizdb"
+    user: "ofbizuser"
+    password:
+      # The operator will create a secret named 'ofbiz-production-database-password'
+      # with this value, and mount it into the OFBiz pod.
+      value: "aVeryStrongPasswordForOfbizDB123!"
+
+  # === OFBiz Initial Admin Account ===
+  initialAdmin:
+    password:
+      # The operator will create a secret named 'ofbiz-production-admin-password'
+      # with this value and pass it as an ENV VAR.
+      value: "singKong"
+
+  # === SSL Certificate (Optional) ===
+  web:
+    # Assumes a secret 'ofbiz-tls-secret' of type kubernetes.io/tls exists
+    sslSecretName: "ofbiz-tls-secret"
+
+  # === Configuration & Storage ===
+  storage:
+    # --- Inline ConfigMap Creation ---
+    configuration:
+      # The operator will create a ConfigMap named 'ofbiz-production-config'
+      # with a key 'entityengine.xml' containing this content.
+      entityEngineXML: |
+        <?xml version="1.0" encoding="UTF-8"?>
+        <entity-engine-xml>
+            <datasource name="default"
+                helper-class="org.apache.ofbiz.entity.datasource.GenericHelperDAO"
+                field-type-name="postgres"
+                schema-name="public"
+                use-foreign-keys="true"
+                use-foreign-key-indices="true"
+                check-on-start="true"
+                add-missing-on-start="true"
+                check-fks-on-start="true"
+                check-fk-indices-on-start="true">
+                <read-data reader-name="main"/>
+                <read-data reader-name="olap"/>
+                <read-data reader-name="report"/>
+                <inline-jdbc
+                    jdbc-driver="org.postgresql.Driver"
+                    jdbc-uri="jdbc:postgresql://${env:OFBIZ_DB_HOST}:${env:OFBIZ_DB_PORT}/${env:OFBIZ_DB_NAME}"
+                    jdbc-user="${env:OFBIZ_DB_USER}"
+                    jdbc-password="${env:OFBIZ_DB_PASSWORD}"
+                    pool-initial-size="10"
+                    pool-max-size="50"
+                    pool-sleep-time="15000"
+                    pool-validation-query="SELECT 1"
+                    isolation-level="ReadCommitted"
+                    />
+            </datasource>
+        </entity-engine-xml>
+    # --- Persistent Storage ---
+    persistence:
+      enabled: true
+      storageClassName: "standard" # Or your cloud provider's class e.g., "gp2"
+      size: "5Gi"
