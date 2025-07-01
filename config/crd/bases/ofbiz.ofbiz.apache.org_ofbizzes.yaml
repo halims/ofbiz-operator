@@ -17,7 +17,6 @@ spec:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Ofbiz is the Schema for the ofbizs API
         properties:
           apiVersion:
             description: |-
@@ -43,27 +42,36 @@ spec:
                 description: Configuration for the external PostgreSQL database.
                 properties:
                   host:
-                    description: Hostname of the PostgreSQL server.
                     type: string
                   name:
-                    description: Name of the database.
                     type: string
-                  passwordSecretName:
-                    description: Name of the Secret containing the database password.
-                      The secret must have a key named 'password'.
-                    type: string
+                  password:
+                    description: |-
+                      PasswordSource defines a source for a password.
+                      Only one of its fields may be set.
+                    properties:
+                      secretName:
+                        description: Name of an existing Secret. The Secret must have
+                          a key named 'password'.
+                        type: string
+                      value:
+                        description: |-
+                          Value of the password.
+                          The operator will create a Secret to store this value.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of `value` or `secretName` must be specified
+                      rule: has(self.value) != has(self.secretName)
                   port:
-                    default: 5432
-                    description: Port of the PostgreSQL server.
                     format: int32
                     type: integer
                   user:
-                    description: Username for the database connection.
                     type: string
                 required:
                 - host
                 - name
-                - passwordSecretName
+                - password
                 - port
                 - user
                 type: object
@@ -73,11 +81,60 @@ spec:
               initialAdmin:
                 description: Configuration for initial admin account.
                 properties:
+                  password:
+                    description: |-
+                      PasswordSource defines a source for a password.
+                      Only one of its fields may be set.
+                    properties:
+                      secretName:
+                        description: Name of an existing Secret. The Secret must have
+                          a key named 'password'.
+                        type: string
+                      value:
+                        description: |-
+                          Value of the password.
+                          The operator will create a Secret to store this value.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of `value` or `secretName` must be specified
+                      rule: has(self.value) != has(self.secretName)
+                required:
+                - password
+                type: object
+              postgresAdmin:
+                description: If provided, the operator will manage the database, user,
+                  and permissions.
+                properties:
+                  host:
+                    description: Hostname of the PostgreSQL server to connect to as
+                      an administrator.
+                    type: string
                   passwordSecretName:
                     description: |-
-                      Name of the Secret containing the admin password. The secret must have a key named 'password'.
-                      The operator will use this to set the initial admin password.
+                      The name of the secret containing the admin user's password.
+                      The secret must have a key named 'password'.
                     type: string
+                  port:
+                    default: 5432
+                    description: Port of the PostgreSQL server. Defaults to 5432.
+                    format: int32
+                    type: integer
+                  sslMode:
+                    default: disable
+                    description: SSL Mode for the admin connection (e.g., 'disable',
+                      'require', 'verify-full').
+                    type: string
+                  user:
+                    description: The user with privileges to create databases and
+                      users (e.g., 'postgres').
+                    type: string
+                required:
+                - host
+                - passwordSecretName
+                - port
+                - sslMode
+                - user
                 type: object
               size:
                 default: 1
@@ -88,28 +145,35 @@ spec:
               storage:
                 description: Storage configuration for OFBiz data and logs.
                 properties:
-                  configurationConfigMapName:
-                    description: |-
-                      Name of an existing ConfigMap with OFBiz configuration files.
-                      If not provided, the operator can create a default one.
-                    type: string
+                  configuration:
+                    description: Source for the OFBiz configuration files.
+                    properties:
+                      configMapName:
+                        description: Name of an existing ConfigMap with OFBiz configuration
+                          files.
+                        type: string
+                      entityEngineXML:
+                        description: |-
+                          Inline entityengine.xml content.
+                          The operator will create a ConfigMap to store this.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of `entityEngineXML` or `configMapName`
+                        must be specified
+                      rule: has(self.entityEngineXML) != has(self.configMapName)
                   persistence:
-                    description: PersistentVolumeClaim configuration for runtime data.
+                    description: PersistenceSpec defines the PVC for stateful data.
                     properties:
                       enabled:
-                        default: true
-                        description: Enable persistence. Defaults to true.
                         type: boolean
                       size:
                         anyOf:
                         - type: integer
                         - type: string
-                        default: 5Gi
-                        description: Size of the persistent volume. e.g., "10Gi".
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       storageClassName:
-                        description: Storage class to use for the PVC.
                         type: string
                     required:
                     - enabled
@@ -120,9 +184,6 @@ spec:
                 description: Web configuration, including SSL.
                 properties:
                   sslSecretName:
-                    description: |-
-                      Name of the Secret of type kubernetes.io/tls for SSL.
-                      The secret must contain 'tls.crt' and 'tls.key'.
                     type: string
                 type: object
             required:
@@ -134,9 +195,6 @@ spec:
             description: OfbizStatus defines the observed state of Ofbiz
             properties:
               conditions:
-                description: |-
-                  Represents the observations of a Ofbiz's current state.
-                  Known .status.conditions.type are: "Available", "Progressing", and "Degraded"
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -193,7 +251,6 @@ spec:
                   type: object
                 type: array
               nodes:
-                description: List of pod names managed by this Ofbiz instance.
                 items:
                   type: string
                 type: array

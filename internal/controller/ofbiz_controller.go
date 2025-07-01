@@ -20,7 +20,12 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"time"
+
+	// add the postgres driver
+	_ "github.com/lib/pq"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	ofbizv1alpha1 "github.com/halims/ofbiz-operator/api/v1alpha1"
@@ -51,29 +57,50 @@ type OfbizReconciler struct {
 func (r *OfbizReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the Ofbiz instance
 	ofbiz := &ofbizv1alpha1.Ofbiz{}
-	err := r.Get(ctx, req.NamespacedName, ofbiz)
-	if err != nil {
+	if err := r.Get(ctx, req.NamespacedName, ofbiz); err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("Ofbiz resource not found. Ignoring since object must be deleted.")
 			return ctrl.Result{}, nil
 		}
-		logger.Error(err, "Failed to get Ofbiz resource")
 		return ctrl.Result{}, err
 	}
 
-	// Reconcile Service
+	// 1. Reconcile PostgreSQL Database and User (if admin creds are provided)
+	if ofbiz.Spec.PostgresAdmin != nil {
+		logger.Info("PostgresAdmin spec found, reconciling database...")
+		if err := r.reconcilePostgresDB(ctx, ofbiz); err != nil {
+			logger.Error(err, "Failed to reconcile PostgreSQL database")
+			// Requeue after a delay on DB error
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		}
+		logger.Info("Database reconciliation successful")
+	}
+
+	// 2. Reconcile Secrets from inline values
+	dbSecretName, err := r.reconcilePasswordSecret(ctx, ofbiz, "database", ofbiz.Spec.Database.Password)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	adminSecretName, err := r.reconcilePasswordSecret(ctx, ofbiz, "admin", ofbiz.Spec.InitialAdmin.Password)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 3. Reconcile ConfigMap from inline XML
+	configMapName, err := r.reconcileConfigMap(ctx, ofbiz)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 4. Reconcile Service
 	service := r.serviceForOfbiz(ofbiz)
-	err = r.reconcileService(ctx, ofbiz, service)
-	if err != nil {
+	if err := r.reconcileService(ctx, ofbiz, service); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Reconcile StatefulSet
-	statefulSet := r.statefulSetForOfbiz(ofbiz)
-	err = r.reconcileStatefulSet(ctx, ofbiz, statefulSet)
-	if err != nil {
+	// 5. Reconcile StatefulSet
+	statefulSet := r.statefulSetForOfbiz(ofbiz, dbSecretName, adminSecretName, configMapName)
+	if err := r.reconcileStatefulSet(ctx, ofbiz, statefulSet); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -96,6 +123,162 @@ func (r *OfbizReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// reconcilePostgresDB connects to postgres and ensures the database and user exist.
+func (r *OfbizReconciler) reconcilePostgresDB(ctx context.Context, ofbiz *ofbizv1alpha1.Ofbiz) error {
+	logger := log.FromContext(ctx)
+	adminSpec := ofbiz.Spec.PostgresAdmin
+
+	// Fetch the admin password from its secret
+	adminPasswordSecret := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: adminSpec.PasswordSecretName, Namespace: ofbiz.Namespace}, adminPasswordSecret)
+	if err != nil {
+		return fmt.Errorf("failed to get postgres admin secret %s: %w", adminSpec.PasswordSecretName, err)
+	}
+	adminPassword, ok := adminPasswordSecret.Data["password"]
+	if !ok {
+		return fmt.Errorf("secret %s does not contain a 'password' key", adminSpec.PasswordSecretName)
+	}
+
+	// Connect to the default 'postgres' database to perform admin tasks
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=postgres sslmode=%s",
+		adminSpec.Host, adminSpec.Port, adminSpec.User, string(adminPassword), adminSpec.SslMode)
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("failed to open postgres connection: %w", err)
+	}
+	defer db.Close()
+
+	if err = db.PingContext(ctx); err != nil {
+		return fmt.Errorf("failed to ping postgres: %w", err)
+	}
+
+	// Idempotently create the database
+	var dbExists bool
+	err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", ofbiz.Spec.Database.Name).Scan(&dbExists)
+	if err != nil {
+		return fmt.Errorf("failed to check if database exists: %w", err)
+	}
+	if !dbExists {
+		logger.Info("Database does not exist, creating it", "DB", ofbiz.Spec.Database.Name)
+		_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %s", pqQuoteIdentifier(ofbiz.Spec.Database.Name)))
+		if err != nil {
+			return fmt.Errorf("failed to create database: %w", err)
+		}
+	}
+
+	// Get the OFBiz user's password (which we might have just created in a secret)
+	ofbizPassword, err := r.getPassword(ctx, ofbiz, ofbiz.Spec.Database.Password)
+	if err != nil {
+		return fmt.Errorf("could not resolve password for ofbiz user %s: %w", ofbiz.Spec.Database.User, err)
+	}
+
+	// Idempotently create the user
+	var userExists bool
+	err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_user WHERE usename = $1)", ofbiz.Spec.Database.User).Scan(&userExists)
+	if err != nil {
+		return fmt.Errorf("failed to check if user exists: %w", err)
+	}
+	if !userExists {
+		logger.Info("User does not exist, creating it", "User", ofbiz.Spec.Database.User)
+		// Use parameterized query for the password to avoid SQL injection
+		_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE USER %s WITH PASSWORD $1", pqQuoteIdentifier(ofbiz.Spec.Database.User)), ofbizPassword)
+		if err != nil {
+			return fmt.Errorf("failed to create user: %w", err)
+		}
+	}
+
+	// Grant privileges
+	logger.Info("Granting privileges to user on database")
+	grantQuery := fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
+		pqQuoteIdentifier(ofbiz.Spec.Database.Name), pqQuoteIdentifier(ofbiz.Spec.Database.User))
+	_, err = db.ExecContext(ctx, grantQuery)
+	if err != nil {
+		return fmt.Errorf("failed to grant privileges: %w", err)
+	}
+
+	return nil
+}
+
+// reconcilePasswordSecret creates a secret if a value is provided in the spec.
+// It returns the name of the secret to be used.
+func (r *OfbizReconciler) reconcilePasswordSecret(ctx context.Context, ofbiz *ofbizv1alpha1.Ofbiz, purpose string, source ofbizv1alpha1.PasswordSource) (string, error) {
+	if source.SecretName != "" {
+		// User provided an existing secret, so we just use it.
+		return source.SecretName, nil
+	}
+
+	if source.Value == "" {
+		// No value and no secret name, nothing to do.
+		return "", nil
+	}
+
+	logger := log.FromContext(ctx)
+	secretName := fmt.Sprintf("%s-%s-password", ofbiz.Name, purpose)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: ofbiz.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		secret.StringData = map[string]string{
+			"password": source.Value,
+		}
+		return controllerutil.SetControllerReference(ofbiz, secret, r.Scheme)
+	})
+	if err != nil {
+		logger.Error(err, "Failed to create/update password secret", "SecretName", secretName)
+		return "", err
+	}
+
+	logger.Info("Successfully reconciled password secret", "SecretName", secretName)
+	return secretName, nil
+}
+
+// reconcileConfigMap creates a ConfigMap from the inline spec.
+// It returns the name of the ConfigMap to be used.
+func (r *OfbizReconciler) reconcileConfigMap(ctx context.Context, ofbiz *ofbizv1alpha1.Ofbiz) (string, error) {
+	if ofbiz.Spec.Storage == nil || ofbiz.Spec.Storage.Configuration == nil {
+		return "", nil // No configuration specified
+	}
+
+	source := ofbiz.Spec.Storage.Configuration
+	if source.ConfigMapName != "" {
+		// User provided an existing ConfigMap.
+		return source.ConfigMapName, nil
+	}
+
+	if source.EntityEngineXML == "" {
+		// No inline value and no name, nothing to do.
+		return "", nil
+	}
+
+	logger := log.FromContext(ctx)
+	cmName := fmt.Sprintf("%s-config", ofbiz.Name)
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: ofbiz.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+		configMap.Data = map[string]string{
+			"entityengine.xml": source.EntityEngineXML,
+		}
+		return controllerutil.SetControllerReference(ofbiz, configMap, r.Scheme)
+	})
+	if err != nil {
+		logger.Error(err, "Failed to create/update configmap", "ConfigMapName", cmName)
+		return "", err
+	}
+
+	logger.Info("Successfully reconciled configmap", "ConfigMapName", cmName)
+	return cmName, nil
 }
 
 // serviceForOfbiz defines the Service for the Ofbiz cluster
@@ -125,6 +308,26 @@ func (r *OfbizReconciler) serviceForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *corev1.Se
 	}
 	ctrl.SetControllerReference(ofbiz, svc, r.Scheme)
 	return svc
+}
+
+// getPassword is a helper to retrieve a password from either its inline value or a referenced secret.
+func (r *OfbizReconciler) getPassword(ctx context.Context, ofbiz *ofbizv1alpha1.Ofbiz, source ofbizv1alpha1.PasswordSource) (string, error) {
+	if source.Value != "" {
+		return source.Value, nil
+	}
+	if source.SecretName != "" {
+		secret := &corev1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{Name: source.SecretName, Namespace: ofbiz.Namespace}, secret)
+		if err != nil {
+			return "", err
+		}
+		password, ok := secret.Data["password"]
+		if !ok {
+			return "", fmt.Errorf("secret %s does not contain a 'password' key", source.SecretName)
+		}
+		return string(password), nil
+	}
+	return "", fmt.Errorf("no password source defined")
 }
 
 // reconcileService ensures the Service exists and is up-to-date
@@ -209,24 +412,47 @@ func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *appsv
 			Name: "OFBIZ_DB_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: ofbiz.Spec.Database.PasswordSecretName,
-					},
-					Key: "password",
+					LocalObjectReference: corev1.LocalObjectReference{Name: dbSecretName},
+					Key:                  "password",
 				},
 			},
 		},
 	}
 	// Admin Password
-	if ofbiz.Spec.InitialAdmin.PasswordSecretName != "" {
+	if adminSecretName != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name: "OFBIZ_ADMIN_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: ofbiz.Spec.InitialAdmin.PasswordSecretName,
-					},
-					Key: "password",
+					LocalObjectReference: corev1.LocalObjectReference{Name: adminSecretName},
+					Key:                  "password",
+				},
+			},
+		})
+	}
+	//	if ofbiz.Spec.InitialAdmin.PasswordSecretName != "" {
+	//		envVars = append(envVars, corev1.EnvVar{
+	//			Name: "OFBIZ_ADMIN_PASSWORD",
+	//			ValueFrom: &corev1.EnvVarSource{
+	//				SecretKeyRef: &corev1.SecretKeySelector{
+	//					LocalObjectReference: corev1.LocalObjectReference{
+	//						Name: ofbiz.Spec.InitialAdmin.PasswordSecretName,
+	//					},
+	//					Key: "password",
+	//				},
+	//			},
+	//		})
+	//	}
+
+	// --- Define Volumes ---
+	volumes := []corev1.Volume{}
+	// Mount the configuration ConfigMap
+	if configMapName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "config-volume",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
 				},
 			},
 		})
@@ -286,6 +512,22 @@ func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *appsv
 
 	ctrl.SetControllerReference(ofbiz, sts, r.Scheme)
 	return sts
+}
+
+// pqQuoteIdentifier safely quotes a Postgres identifier.
+func pqQuoteIdentifier(name string) string {
+	return `"` + name + `"`
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *OfbizReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&ofbizv1alpha1.Ofbiz{}).
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.Secret{}).    // We now own Secrets
+		Owns(&corev1.ConfigMap{}). // and ConfigMaps
+		Complete(r)
 }
 
 // reconcileStatefulSet ensures the StatefulSet exists and is up-to-date

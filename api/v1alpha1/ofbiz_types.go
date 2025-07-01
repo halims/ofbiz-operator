@@ -23,6 +23,57 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// PasswordSource defines a source for a password.
+// Only one of its fields may be set.
+// +kubebuilder:validation:XValidation:rule="has(self.value) != has(self.secretName)", message="exactly one of `value` or `secretName` must be specified"
+type PasswordSource struct {
+	// Value of the password.
+	// The operator will create a Secret to store this value.
+	// +optional
+	Value string `json:"value,omitempty"`
+	// Name of an existing Secret. The Secret must have a key named 'password'.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+}
+
+// ConfigurationSource defines a source for OFBiz configuration.
+// Only one of its fields may be set.
+// +kubebuilder:validation:XValidation:rule="has(self.entityEngineXML) != has(self.configMapName)", message="exactly one of `entityEngineXML` or `configMapName` must be specified"
+type ConfigurationSource struct {
+	// Inline entityengine.xml content.
+	// The operator will create a ConfigMap to store this.
+	// +optional
+	EntityEngineXML string `json:"entityEngineXML,omitempty"`
+	// Name of an existing ConfigMap with OFBiz configuration files.
+	// +optional
+	ConfigMapName string `json:"configMapName,omitempty"`
+}
+
+// PostgresAdminSpec holds credentials for the operator to manage the database.
+// If this section is provided, the operator will attempt to create the database and user.
+type PostgresAdminSpec struct {
+	// Hostname of the PostgreSQL server to connect to as an administrator.
+	// +kubebuilder:validation:Required
+	Host string `json:"host"`
+
+	// Port of the PostgreSQL server. Defaults to 5432.
+	// +kubebuilder:default=5432
+	Port int32 `json:"port"`
+
+	// The user with privileges to create databases and users (e.g., 'postgres').
+	// +kubebuilder:validation:Required
+	User string `json:"user"`
+
+	// The name of the secret containing the admin user's password.
+	// The secret must have a key named 'password'.
+	// +kubebuilder:validation:Required
+	PasswordSecretName string `json:"passwordSecretName"`
+
+	// SSL Mode for the admin connection (e.g., 'disable', 'require', 'verify-full').
+	// +kubebuilder:default=disable
+	SslMode string `json:"sslMode"`
+}
+
 // OfbizSpec defines the desired state of Ofbiz
 type OfbizSpec struct {
 	// Number of desired pods. Defaults to 1.
@@ -37,6 +88,10 @@ type OfbizSpec struct {
 	// Configuration for the external PostgreSQL database.
 	// +kubebuilder:validation:Required
 	Database DatabaseSpec `json:"database"`
+
+	// If provided, the operator will manage the database, user, and permissions.
+	// +optional
+	PostgresAdmin *PostgresAdminSpec `json:"postgresAdmin,omitempty"`
 
 	// Web configuration, including SSL.
 	// +optional
@@ -53,96 +108,56 @@ type OfbizSpec struct {
 
 // DatabaseSpec defines the external database connection details.
 type DatabaseSpec struct {
-	// Hostname of the PostgreSQL server.
-	// +kubebuilder:validation:Required
-	Host string `json:"host"`
-
-	// Port of the PostgreSQL server.
-	// +kubebuilder:default=5432
-	Port int32 `json:"port"`
-
-	// Name of the database.
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-
-	// Username for the database connection.
-	// +kubebuilder:validation:Required
-	User string `json:"user"`
-
-	// Name of the Secret containing the database password. The secret must have a key named 'password'.
-	// +kubebuilder:validation:Required
-	PasswordSecretName string `json:"passwordSecretName"`
+	Host     string         `json:"host"`
+	Port     int32          `json:"port"`
+	Name     string         `json:"name"`
+	User     string         `json:"user"`
+	Password PasswordSource `json:"password"`
 }
 
 // WebSpec defines web server configuration.
 type WebSpec struct {
-	// Name of the Secret of type kubernetes.io/tls for SSL.
-	// The secret must contain 'tls.crt' and 'tls.key'.
-	// +optional
 	SslSecretName string `json:"sslSecretName,omitempty"`
 }
 
 // AdminAccountSpec defines the initial admin credentials.
 type AdminAccountSpec struct {
-	// Name of the Secret containing the admin password. The secret must have a key named 'password'.
-	// The operator will use this to set the initial admin password.
-	// +optional
-	PasswordSecretName string `json:"passwordSecretName,omitempty"`
+	Password PasswordSource `json:"password"`
 }
 
 // StorageSpec defines the persistence configuration.
 type StorageSpec struct {
-	// Name of an existing ConfigMap with OFBiz configuration files.
-	// If not provided, the operator can create a default one.
+	// Source for the OFBiz configuration files.
 	// +optional
-	ConfigurationConfigMapName string `json:"configurationConfigMapName,omitempty"`
-
-	// PersistentVolumeClaim configuration for runtime data.
-	// +optional
-	Persistence PersistenceSpec `json:"persistence,omitempty"`
+	Configuration *ConfigurationSource `json:"configuration,omitempty"`
+	Persistence   PersistenceSpec      `json:"persistence,omitempty"`
 }
 
 // PersistenceSpec defines the PVC for stateful data.
 type PersistenceSpec struct {
-	// Enable persistence. Defaults to true.
-	// +kubebuilder:default=true
-	Enabled bool `json:"enabled"`
-
-	// Storage class to use for the PVC.
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// Size of the persistent volume. e.g., "10Gi".
-	// +kubebuilder:default="5Gi"
-	Size resource.Quantity `json:"size"`
+	Enabled          bool              `json:"enabled"`
+	StorageClassName string            `json:"storageClassName,omitempty"`
+	Size             resource.Quantity `json:"size"`
 }
 
 // OfbizStatus defines the observed state of Ofbiz
 type OfbizStatus struct {
-	// Represents the observations of a Ofbiz's current state.
-	// Known .status.conditions.type are: "Available", "Progressing", and "Degraded"
-	// +operator-sdk:csv:customresourcedefinitions:type=status
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
-
-	// List of pod names managed by this Ofbiz instance.
-	Nodes []string `json:"nodes,omitempty"`
+	Nodes      []string           `json:"nodes,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 
-// Ofbiz is the Schema for the ofbizs API
 type Ofbiz struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-
-	Spec   OfbizSpec   `json:"spec,omitempty"`
-	Status OfbizStatus `json:"status,omitempty"`
+	Spec              OfbizSpec   `json:"spec,omitempty"`
+	Status            OfbizStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 
-// OfbizList contains a list of Ofbiz
 type OfbizList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
