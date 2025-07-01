@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	ofbizv1alpha1 "github.com/your-username/ofbiz-operator/api/v1alpha1"
+	ofbizv1alpha1 "github.com/halims/ofbiz-operator/api/v1alpha1"
 )
 
 // OfbizReconciler reconciles a Ofbiz object
@@ -42,9 +42,9 @@ type OfbizReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-//+kubebuilder:rbac:groups=ofbiz.apache.org,resources=ofbizs,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=ofbiz.apache.org,resources=ofbizs/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=ofbiz.apache.org,resources=ofbizs/finalizers,verbs=update
+//+kubebuilder:rbac:groups=ofbiz.ofbiz.apache.org,resources=ofbizzes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=ofbiz.ofbiz.apache.org,resources=ofbizzes/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=ofbiz.ofbiz.apache.org,resources=ofbizzes/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods;services;secrets;configmaps;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
@@ -241,7 +241,8 @@ func (r *OfbizReconciler) statefulSetForOfbiz(ofbiz *ofbizv1alpha1.Ofbiz) *appsv
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.ResourceRequirements{
+				//				Resources: corev1.ResourceRequirements{
+				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceStorage: ofbiz.Spec.Storage.Persistence.Size,
 					},
