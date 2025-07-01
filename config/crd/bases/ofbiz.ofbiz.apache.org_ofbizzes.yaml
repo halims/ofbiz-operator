@@ -41,40 +41,145 @@ spec:
               database:
                 description: Configuration for the external PostgreSQL database.
                 properties:
+                  createDB:
+                    default: false
+                    description: Auto create ofbiz database
+                    type: boolean
+                  dataLoad:
+                    default: none
+                    description: Data Load Mode (e.g., 'none', 'seed', 'demo').
+                    type: string
                   host:
+                    description: Hostname of the PostgreSQL server to connect to as
+                      an administrator.
                     type: string
-                  name:
-                    type: string
-                  password:
-                    description: |-
-                      PasswordSource defines a source for a password.
-                      Only one of its fields may be set.
+                  ofbizDB:
+                    description: ofbiz database
                     properties:
-                      secretName:
-                        description: Name of an existing Secret. The Secret must have
-                          a key named 'password'.
+                      name:
+                        description: Database name.
                         type: string
-                      value:
-                        description: |-
-                          Value of the password.
-                          The operator will create a Secret to store this value.
+                      password:
+                        description: The 'password' used for database user.
+                        properties:
+                          secretName:
+                            description: Name of an existing Secret. The Secret must
+                              have a key named 'password'.
+                            type: string
+                          value:
+                            description: |-
+                              Value of the password.
+                              The operator will create a Secret to store this value.
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of `value` or `secretName` must be
+                            specified
+                          rule: has(self.value) != has(self.secretName)
+                      user:
+                        description: The user which privileges to own ofbiz database
                         type: string
+                    required:
+                    - name
+                    - password
+                    - user
                     type: object
-                    x-kubernetes-validations:
-                    - message: exactly one of `value` or `secretName` must be specified
-                      rule: has(self.value) != has(self.secretName)
+                  ofbizOLAPDB:
+                    description: ofbiz OLAP database
+                    properties:
+                      name:
+                        description: Database name.
+                        type: string
+                      password:
+                        description: The 'password' used for database user.
+                        properties:
+                          secretName:
+                            description: Name of an existing Secret. The Secret must
+                              have a key named 'password'.
+                            type: string
+                          value:
+                            description: |-
+                              Value of the password.
+                              The operator will create a Secret to store this value.
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of `value` or `secretName` must be
+                            specified
+                          rule: has(self.value) != has(self.secretName)
+                      user:
+                        description: The user which privileges to own ofbiz database
+                        type: string
+                    required:
+                    - name
+                    - password
+                    - user
+                    type: object
+                  ofbizTenantDB:
+                    description: ofbiz Tenant database
+                    properties:
+                      name:
+                        description: Database name.
+                        type: string
+                      password:
+                        description: The 'password' used for database user.
+                        properties:
+                          secretName:
+                            description: Name of an existing Secret. The Secret must
+                              have a key named 'password'.
+                            type: string
+                          value:
+                            description: |-
+                              Value of the password.
+                              The operator will create a Secret to store this value.
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of `value` or `secretName` must be
+                            specified
+                          rule: has(self.value) != has(self.secretName)
+                      user:
+                        description: The user which privileges to own ofbiz database
+                        type: string
+                    required:
+                    - name
+                    - password
+                    - user
+                    type: object
                   port:
+                    default: 5432
+                    description: Port of the PostgreSQL server. Defaults to 5432.
                     format: int32
                     type: integer
-                  user:
+                  postgresAdmin:
+                    description: If provided, the operator will manage the database,
+                      user, and permissions.
+                    properties:
+                      passwordSecretName:
+                        description: |-
+                          The name of the secret containing the admin user's password.
+                          The secret must have a key named 'password'.
+                        type: string
+                      user:
+                        description: postgre super user
+                        type: string
+                    required:
+                    - passwordSecretName
+                    - user
+                    type: object
+                  sslMode:
+                    default: disable
+                    description: SSL Mode for the admin connection (e.g., 'disable',
+                      'require', 'verify-full').
                     type: string
                 required:
                 - host
-                - name
-                - password
                 - port
-                - user
+                - sslMode
                 type: object
+              enableAJP:
+                description: AJP port enablement.
+                type: boolean
               image:
                 description: The container image for OFBiz.
                 type: string
@@ -102,41 +207,10 @@ spec:
                 required:
                 - password
                 type: object
-              postgresAdmin:
-                description: If provided, the operator will manage the database, user,
-                  and permissions.
-                properties:
-                  host:
-                    description: Hostname of the PostgreSQL server to connect to as
-                      an administrator.
-                    type: string
-                  passwordSecretName:
-                    description: |-
-                      The name of the secret containing the admin user's password.
-                      The secret must have a key named 'password'.
-                    type: string
-                  port:
-                    default: 5432
-                    description: Port of the PostgreSQL server. Defaults to 5432.
-                    format: int32
-                    type: integer
-                  sslMode:
-                    default: disable
-                    description: SSL Mode for the admin connection (e.g., 'disable',
-                      'require', 'verify-full').
-                    type: string
-                  user:
-                    description: The user with privileges to create databases and
-                      users (e.g., 'postgres').
-                    type: string
-                required:
-                - host
-                - passwordSecretName
-                - port
-                - sslMode
-                - user
-                type: object
-              size:
+              javaOpts:
+                description: Java Opts.
+                type: string
+              replicas:
                 default: 1
                 description: Number of desired pods. Defaults to 1.
                 format: int32
@@ -189,7 +263,7 @@ spec:
             required:
             - database
             - image
-            - size
+            - replicas
             type: object
           status:
             description: OfbizStatus defines the observed state of Ofbiz
